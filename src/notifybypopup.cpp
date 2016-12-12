@@ -38,7 +38,6 @@
 #include <QGuiApplication>
 #include <QBoxLayout>
 #include <QLayout>
-#include <QtDBus/QtDBus>
 #include <QDBusConnection>
 #include <QDBusConnectionInterface>
 #include <QDBusServiceWatcher>
@@ -54,7 +53,6 @@
 #include <QScreen>
 #include <QFontMetrics>
 #include <QIcon>
-#include <QFile>
 
 #include <kconfiggroup.h>
 #include <KCodecs/KCharsets>
@@ -62,10 +60,6 @@
 static const char dbusServiceName[] = "org.freedesktop.Notifications";
 static const char dbusInterfaceName[] = "org.freedesktop.Notifications";
 static const char dbusPath[] = "/org/freedesktop/Notifications";
-
-static const char portalDbusServiceName[] = "org.freedesktop.portal.Desktop";
-static const char portalDbusInterfaceName[] = "org.freedesktop.portal.Notification";
-static const char portalDbusPath[] = "/org/freedesktop/portal/desktop";
 
 class NotifyByPopupPrivate {
 public:
@@ -144,17 +138,6 @@ public:
      */
     QHash<uint, QPointer<KNotification>> galagoNotifications;
 
-    /*
-     * We need to know whether we are running in sandbox and whether we need
-     * to send notifications using flatpak portal
-     */
-    bool inSandbox;
-
-    /*
-     * Holds the id that will be assigned to the next notification source
-     * that will be created
-     */
-    uint nextId;
 
     NotifyByPopup * const q;
 
@@ -180,27 +163,19 @@ NotifyByPopup::NotifyByPopup(QObject *parent)
     d->dbusServiceCapCacheDirty = true;
     d->nextPosition = -1;
 
-    d->inSandbox = false;
-    const QString runtimeDir = qgetenv("XDG_RUNTIME_DIR");
-    if (!runtimeDir.isEmpty()) {
-        d->inSandbox = QFile::exists(runtimeDir + QLatin1String("/flatpak-info"));
-    }
-
     // check if service already exists on plugin instantiation
     QDBusConnectionInterface *interface = QDBusConnection::sessionBus().interface();
-    // Also check whether we don't see org.freedesktop.Notifications outside the sandbox
-//     d->inSandbox = interface && !interface->isServiceRegistered(dbusServiceName);
-    d->dbusServiceExists = interface && interface->isServiceRegistered(d->inSandbox ? portalDbusServiceName : dbusServiceName);
+    d->dbusServiceExists = interface && interface->isServiceRegistered(dbusServiceName);
 
     if (d->dbusServiceExists) {
-        onServiceOwnerChanged(d->inSandbox ? portalDbusServiceName : dbusServiceName, QString(), QStringLiteral("_")); //connect signals
+        onServiceOwnerChanged(dbusServiceName, QString(), QStringLiteral("_")); //connect signals
     }
 
     // to catch register/unregister events from service in runtime
     QDBusServiceWatcher *watcher = new QDBusServiceWatcher(this);
     watcher->setConnection(QDBusConnection::sessionBus());
     watcher->setWatchMode(QDBusServiceWatcher::WatchForOwnerChange);
-    watcher->addWatchedService(d->inSandbox ? portalDbusServiceName : dbusServiceName);
+    watcher->addWatchedService(dbusServiceName);
     connect(watcher, SIGNAL(serviceOwnerChanged(QString,QString,QString)),
             SLOT(onServiceOwnerChanged(QString,QString,QString)));
 
@@ -217,7 +192,7 @@ NotifyByPopup::NotifyByPopup(QObject *parent)
 
             // FIXME - this should be async
             QDBusReply<QStringList> reply = QDBusConnection::sessionBus().call(message);
-            if (reply.isValid() && reply.value().contains(d->inSandbox ? portalDbusServiceName : dbusServiceName)) {
+            if (reply.isValid() && reply.value().contains(dbusServiceName)) {
                 startfdo = true;
                 // We need to set d->dbusServiceExists to true because dbus might be too slow
                 // starting the service and the first call to NotifyByPopup::notify
@@ -229,7 +204,7 @@ NotifyByPopup::NotifyByPopup(QObject *parent)
         }
 #endif
         if (startfdo) {
-            QDBusConnection::sessionBus().interface()->startService(d->inSandbox ? portalDbusServiceName : dbusServiceName);
+            QDBusConnection::sessionBus().interface()->startService(dbusServiceName);
         }
     }
 }
@@ -259,7 +234,7 @@ void NotifyByPopup::notify(KNotification *notification, const KNotifyConfig &not
 
     // check if Notifications DBus service exists on bus, use it if it does
     if (d->dbusServiceExists) {
-        if (d->dbusServiceCapCacheDirty && !d->inSandbox) {
+        if (d->dbusServiceCapCacheDirty) {
             // if we don't have the server capabilities yet, we need to query for them first;
             // as that is an async dbus operation, we enqueue the notification and process them
             // when we receive dbus reply with the server capabilities
@@ -457,7 +432,6 @@ void NotifyByPopup::onServiceOwnerChanged(const QString &serviceName, const QStr
     Q_FOREACH (KNotification *n, d->passivePopups.keys()) {
         finished(n);
     }
-
     d->galagoNotifications.clear();
     d->passivePopups.clear();
 
@@ -470,34 +444,25 @@ void NotifyByPopup::onServiceOwnerChanged(const QString &serviceName, const QStr
     } else if (oldOwner.isEmpty()) {
         d->dbusServiceExists = true;
 
-        if (d->inSandbox) {
-            d->nextId = 1;
-            d->popupServerCapabilities << QStringLiteral("actions") << QStringLiteral("body") << QStringLiteral("body-hyperlinks")
-                                       << QStringLiteral("body-markup") << QStringLiteral("icon-static");
-        }
-
         // connect to action invocation signals
         bool connected = QDBusConnection::sessionBus().connect(QString(), // from any service
-                                                               d->inSandbox ? portalDbusPath : dbusPath,
-                                                               d->inSandbox ? portalDbusInterfaceName : dbusInterfaceName,
+                                                               dbusPath,
+                                                               dbusInterfaceName,
                                                                QStringLiteral("ActionInvoked"),
                                                                this,
-                                                               d->inSandbox ? SLOT(onPortalNotificationActionInvoked(QString,QString,QVariantList)) : SLOT(onGalagoNotificationActionInvoked(uint,QString)));
+                                                               SLOT(onGalagoNotificationActionInvoked(uint,QString)));
         if (!connected) {
             qCWarning(LOG_KNOTIFICATIONS) << "warning: failed to connect to ActionInvoked dbus signal";
         }
 
-        // Doesn't make sense connecting to this signal when we are in sandbox as the portal doesn't have such signal
-        if (!d->inSandbox) {
-            connected = QDBusConnection::sessionBus().connect(QString(), // from any service
-                                                              dbusPath,
-                                                              dbusInterfaceName,
-                                                              QStringLiteral("NotificationClosed"),
-                                                              this,
-                                                              SLOT(onGalagoNotificationClosed(uint,uint)));
-            if (!connected) {
-                qCWarning(LOG_KNOTIFICATIONS) << "warning: failed to connect to NotificationClosed dbus signal";
-            }
+        connected = QDBusConnection::sessionBus().connect(QString(), // from any service
+                                                          dbusPath,
+                                                          dbusInterfaceName,
+                                                          QStringLiteral("NotificationClosed"),
+                                                          this,
+                                                          SLOT(onGalagoNotificationClosed(uint,uint)));
+        if (!connected) {
+            qCWarning(LOG_KNOTIFICATIONS) << "warning: failed to connect to NotificationClosed dbus signal";
         }
     }
 }
@@ -565,12 +530,6 @@ void NotifyByPopup::onGalagoServerCapabilitiesReceived(const QStringList &capabi
     }
 
     d->notificationQueue.clear();
-}
-
-void NotifyByPopup::onPortalNotificationActionInvoked(const QString &id, const QString &action, const QVariantList &parameter)
-{
-    Q_UNUSED(parameter);
-    onGalagoNotificationActionInvoked(id.toInt(), action);
 }
 
 void NotifyByPopupPrivate::getAppCaptionAndIconName(const KNotifyConfig &notifyConfig, QString *appCaption, QString *iconName)
@@ -668,15 +627,9 @@ bool NotifyByPopupPrivate::sendNotificationToGalagoServer(KNotification *notific
         }
     }
 
-    QDBusMessage dbusNotificationMessage;
-    dbusNotificationMessage = QDBusMessage::createMethodCall(inSandbox ? portalDbusServiceName : dbusServiceName,
-                                                             inSandbox ? portalDbusPath : dbusPath,
-                                                             inSandbox ? portalDbusInterfaceName : dbusInterfaceName,
-                                                             inSandbox ? QStringLiteral("AddNotification") : QStringLiteral("Notify"));
+    QDBusMessage dbusNotificationMessage = QDBusMessage::createMethodCall(dbusServiceName, dbusPath, dbusInterfaceName, QStringLiteral("Notify"));
 
     QList<QVariant> args;
-    // Will be used only with flatpak portal
-    QVariantMap portalArgs;
 
     QString appCaption;
     QString iconName;
@@ -686,6 +639,10 @@ bool NotifyByPopupPrivate::sendNotificationToGalagoServer(KNotification *notific
     if (!notification->iconName().isEmpty()) {
         iconName = notification->iconName();
     }
+
+    args.append(appCaption); // app_name
+    args.append(updateId);  // notification to update
+    args.append(iconName); // app_icon
 
     QString title = notification->title().isEmpty() ? appCaption : notification->title();
     QString text = notification->text();
@@ -698,6 +655,9 @@ bool NotifyByPopupPrivate::sendNotificationToGalagoServer(KNotification *notific
             text = stripHtml(text);
         }
     }
+
+    args.append(title); // summary
+    args.append(text); // body
 
     // galago spec defines action list to be list like
     // (act_id1, action1, act_id2, action2, ...)
@@ -713,6 +673,8 @@ bool NotifyByPopupPrivate::sendNotificationToGalagoServer(KNotification *notific
             actionList.append(actionName);
         }
     }
+
+    args.append(actionList); // actions
 
     QVariantMap hintsMap;
     // Add the application name to the hints.
@@ -741,56 +703,24 @@ bool NotifyByPopupPrivate::sendNotificationToGalagoServer(KNotification *notific
         hintsMap[QStringLiteral("image_data")] = ImageConverter::variantForImage(QImage::fromData(pixmapData));
     }
 
+    args.append(hintsMap); // hints
+
     // Persistent     => 0  == infinite timeout
     // CloseOnTimeout => -1 == let the server decide
     int timeout = notification->flags() & KNotification::Persistent ? 0 : -1;
 
-    if (inSandbox) {
-        QList<QVariantMap> buttons;
-        for (int i = 0; i < actionList.count(); i += 2) {
-            QVariantMap button;
-            button.insert(QStringLiteral("action"), actionList.at(i));
-            button.insert(QStringLiteral("label"), actionList.at(i + 1));
-            buttons << button;
-        }
-
-        qDBusRegisterMetaType<QList<QVariantMap> >();
-        portalArgs.insert(QStringLiteral("icon"), iconName);
-        portalArgs.insert(QStringLiteral("title"), title);
-        portalArgs.insert(QStringLiteral("body"), text);
-        portalArgs.insert(QStringLiteral("buttons"), QVariant::fromValue<QList<QVariantMap> >(buttons));
-
-        // TODO priority, default-action, default-target-action
-
-        args.append(QString::number(nextId));
-        args.append(portalArgs);
-    } else {
-        args.append(appCaption); // app_name
-        args.append(updateId);  // notification to update
-        args.append(iconName); // app_icon
-        args.append(title); // summary
-        args.append(text); // body
-        args.append(actionList); // actions
-        args.append(hintsMap); // hints
-        args.append(timeout); // expire timout
-    }
+    args.append(timeout); // expire timout
 
     dbusNotificationMessage.setArguments(args);
 
     QDBusPendingCall notificationCall = QDBusConnection::sessionBus().asyncCall(dbusNotificationMessage, -1);
 
-    // There is no point checking reply when sending through a portal
-    if (!inSandbox) {
-        //parent is set to the notification so that no-one ever accesses a dangling pointer on the notificationObject property
-        QDBusPendingCallWatcher *watcher = new QDBusPendingCallWatcher(notificationCall, notification);
-        watcher->setProperty("notificationObject", QVariant::fromValue<KNotification*>(notification));
+    //parent is set to the notification so that no-one ever accesses a dangling pointer on the notificationObject property
+    QDBusPendingCallWatcher *watcher = new QDBusPendingCallWatcher(notificationCall, notification);
+    watcher->setProperty("notificationObject", QVariant::fromValue<KNotification*>(notification));
 
-        QObject::connect(watcher, SIGNAL(finished(QDBusPendingCallWatcher*)),
-                        q, SLOT(onGalagoServerReply(QDBusPendingCallWatcher*)));
-    } else {
-        // If we are in sandbox we don't need to wait for returned notification id
-        galagoNotifications.insert(nextId++, notification);
-    }
+    QObject::connect(watcher, SIGNAL(finished(QDBusPendingCallWatcher*)),
+                     q, SLOT(onGalagoServerReply(QDBusPendingCallWatcher*)));
 
     return true;
 }
@@ -799,19 +729,15 @@ void NotifyByPopupPrivate::closeGalagoNotification(KNotification *notification)
 {
     uint galagoId = galagoNotifications.key(notification, 0);
 
-    qCDebug(LOG_KNOTIFICATIONS) << "Galago ID: " << galagoId;
-
     if (galagoId == 0) {
         qCDebug(LOG_KNOTIFICATIONS) << "not found dbus id to close" << notification->id();
         return;
     }
 
-    QDBusMessage m = QDBusMessage::createMethodCall(inSandbox ? portalDbusServiceName : dbusServiceName,
-                                                    inSandbox ? portalDbusPath : dbusPath,
-                                                    inSandbox ? portalDbusInterfaceName : dbusInterfaceName,
-                                                    inSandbox ? QStringLiteral("RemoveNotification") : QStringLiteral("CloseNotification"));
+    QDBusMessage m = QDBusMessage::createMethodCall(dbusServiceName, dbusPath,
+                                                    dbusInterfaceName, QStringLiteral("CloseNotification"));
     QList<QVariant> args;
-    args.append(QString::number(galagoId));
+    args.append(galagoId);
     m.setArguments(args);
 
     // send(..) does not block
@@ -830,7 +756,7 @@ void NotifyByPopupPrivate::queryPopupServerCapabilities()
         } else {
             // Return capabilities of the KPassivePopup implementation
             popupServerCapabilities = QStringList() << QStringLiteral("actions") << QStringLiteral("body") << QStringLiteral("body-hyperlinks")
-                                                    << QStringLiteral("body-markup") << QStringLiteral("icon-static");
+                                                      << QStringLiteral("body-markup") << QStringLiteral("icon-static");
         }
     }
 

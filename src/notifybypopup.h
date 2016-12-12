@@ -27,7 +27,6 @@
 #include "knotificationplugin.h"
 
 #include <QStringList>
-#include <QVariantList>
 
 class KNotification;
 class KPassivePopup;
@@ -62,8 +61,6 @@ private Q_SLOTS:
     void onGalagoServerReply(QDBusPendingCallWatcher *callWatcher);
 
     void onGalagoServerCapabilitiesReceived(const QStringList &capabilities);
-
-    void onPortalNotificationActionInvoked(const QString &, const QString &, const QVariantList &);
 
 private:
     // TODO KF6, replace current public notify/update
