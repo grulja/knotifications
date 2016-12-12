@@ -15,6 +15,7 @@ set(knotifications_SRCS
 
   knotifyconfig.cpp
   knotificationplugin.cpp
+  notifybyflatpak.cpp
   notifybypopup.cpp
   imageconverter.cpp #needed to marshal images for sending over dbus by NotifyByPopup
   notifybypopupgrowl.cpp

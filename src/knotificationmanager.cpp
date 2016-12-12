@@ -25,6 +25,8 @@
 #include <QDBusConnection>
 #include <QPointer>
 #include <QBuffer>
+#include <QFile>
+#include <QDBusConnectionInterface>
 #include <KPluginLoader>
 
 #include "knotifyconfig.h"
@@ -34,6 +36,7 @@
 #include "notifybylogfile.h"
 #include "notifybytaskbar.h"
 #include "notifybyexecute.h"
+#include "notifybyflatpak.h"
 #include "debug_p.h"
 
 #ifdef HAVE_PHONON4QT5
@@ -50,6 +53,8 @@ struct KNotificationManager::Private {
     QHash<int, KNotification *> notifications;
     QHash<QString, KNotificationPlugin *> notifyPlugins;
 
+    bool inSandbox;
+    bool portalDBusServiceExists;
     // incremental ids for notifications
     int notifyIdCounter;
     QStringList dirtyConfigCache;
@@ -74,7 +79,24 @@ KNotificationManager::KNotificationManager()
     d->notifyIdCounter = 0;
     qDeleteAll(d->notifyPlugins);
     d->notifyPlugins.clear();
-    addPlugin(new NotifyByPopup(this));
+
+    d->inSandbox = false;
+    const QString runtimeDir = qgetenv("XDG_RUNTIME_DIR");
+    if (!runtimeDir.isEmpty()) {
+        d->inSandbox = QFile::exists(runtimeDir + QLatin1String("/flatpak-info"));
+    }
+
+    QDBusConnectionInterface *interface = QDBusConnection::sessionBus().interface();
+    // Also check whether we don't see org.freedesktop.Notifications outside the sandbox
+    d->portalDBusServiceExists = interface && interface->isServiceRegistered(QStringLiteral("org.freedesktop.portal.Desktop"));
+
+    // If we are running in sandbox and flatpak portal dbus service is available send popup notifications
+    // through the portal
+    if (d->inSandbox && d->portalDBusServiceExists) {
+        addPlugin(new NotifyByFlatpak(this));
+    } else {
+        addPlugin(new NotifyByPopup(this));
+    }
     addPlugin(new NotifyByExecute(this));
     //FIXME: port and reenable
 //     addPlugin(new NotifyByLogfile(this));
